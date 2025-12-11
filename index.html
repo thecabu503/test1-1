@@ -3,15 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CNC-1 Audit (QR Part+Lot)</title>
+    <title>CNC-1 Audit (Excel Master)</title>
     
     <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <script src="https://unpkg.com/jspdf-autotable@3.5.25/dist/jspdf.plugin.autotable.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     
     <script src="https://unpkg.com/html5-qrcode" crossorigin></script>
 
@@ -52,8 +51,6 @@
 
         // --- 2. LOCAL STORAGE DB ---
         const DB_KEY_LOGS = 'cnc_audit_logs';
-        const DB_KEY_PARTS = 'cnc_parts_db';
-        const DB_KEY_PARTS_DATE = 'cnc_parts_date';
         const DB_KEY_USER = 'cnc_user';
 
         const saveLog = (logData) => {
@@ -64,19 +61,77 @@
 
         const getLogs = () => JSON.parse(localStorage.getItem(DB_KEY_LOGS) || '[]');
 
-        // --- 3. COMPONENTS ---
-        
-        // 🚨 ข้อมูลฟอนต์ภาษาไทย (Thai Font Base64) 🚨
-        // หมายเหตุ: กรุณาแทนที่ ... ด้วย String Base64 ของฟอนต์ THSarabunNew ของคุณ หากต้องการใช้งาน PDF ภาษาไทย
-        const THAI_FONT_BASE64 = 'AAEAAAALA... (Base64 string ที่ยาวมากๆ ของคุณ)'; 
-        const THAI_FONT_NAME = 'THSarabunNew';
-
-        const registerThaiFont = (doc) => {
-            if (THAI_FONT_BASE64.startsWith('ใส่') || THAI_FONT_BASE64.startsWith('AAEAAAALA...')) {
-                console.warn("WARNING: Font Base64 ยังไม่ได้ใส่ หรือเป็นตัวอย่าง");
-                return; 
+        // --- EXCEL EXPORT FUNCTION (MASTER) ---
+        const exportToExcel = (specificLog = null) => {
+            let dataToProcess = [];
+            
+            if (specificLog) {
+                dataToProcess = [specificLog];
+            } else {
+                dataToProcess = getLogs();
             }
-            doc.addFont(THAI_FONT_BASE64, THAI_FONT_NAME, 'normal');
+
+            if (dataToProcess.length === 0) {
+                alert("ไม่มีข้อมูลสำหรับ Export");
+                return;
+            }
+
+            // Map data to Flat JSON for Excel
+            const excelData = dataToProcess.map(row => {
+                const flatData = {
+                    "Date": row.date,
+                    "Time": row.finishTime,
+                    "Auditor ID": row.auditorId,
+                    "Audit Type": row.auditType,
+                    "Technician": row.technician,
+                    "Part No": row.partNo,
+                    "Lot No": row.lotNo,
+                };
+
+                // Add Checklist Data
+                CHECKLIST_QUESTIONS_P2.forEach(q => {
+                    if (q.isMatrix) {
+                        q.subItems.forEach((sub, idx) => {
+                            flatData[`${sub}`] = row[`${q.id}-${idx}`] || '-';
+                        });
+                    } else {
+                        flatData[`${q.question.substring(0, 20)}...`] = row[q.id] || '-';
+                        if (q.hasInput && row[q.id] === 'Other') {
+                            flatData[`${q.question.substring(0, 20)}... (Detail)`] = row[`${q.id}_input`] || '-';
+                        }
+                    }
+                });
+
+                // Add Final Data
+                flatData["10.1 Clear Count"] = row.chk10_1 ? 'Yes' : 'No';
+                flatData["10.2 Preset"] = row.chk10_2 ? 'Yes' : 'No';
+                flatData["10.3 Basket (Split)"] = row.q10_3_split_qty;
+                flatData["10.3 Basket (Full)"] = row.q10_3_full_qty;
+                flatData["10.4 Tech (Split)"] = row.q10_4_split_qty;
+                flatData["10.4 Tech (Full)"] = row.q10_4_full_qty;
+                flatData["Total (A)"] = row.q10_5;
+                flatData["Monitor (B)"] = row.q10_6;
+                flatData["Result (A vs B)"] = row.q10_7;
+                flatData["Mismatch Reason"] = row.reason_mismatch || '-';
+                flatData["Over 10 Reason"] = row.reason_over10 || '-';
+                flatData["Leader Sign"] = row.leader_sign || '-';
+                flatData["Status"] = row.discarded ? 'Discarded OK' : '-';
+                flatData["Recorded At"] = row.timestamp;
+
+                return flatData;
+            });
+
+            // Create Workbook
+            const worksheet = XLSX.utils.json_to_sheet(excelData);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Master_Audit_Data");
+            
+            // File Name
+            const fileName = specificLog 
+                ? `Audit_${specificLog.partNo}_${specificLog.date}.xlsx`
+                : `Master_Audit_Export_${new Date().toISOString().slice(0,10)}.xlsx`;
+
+            XLSX.writeFile(workbook, fileName);
         };
 
         // --- ROBUST SCANNER COMPONENT ---
@@ -85,7 +140,7 @@
             const [error, setError] = React.useState(null);
             const [isScanning, setIsScanning] = React.useState(false);
             const scannerRef = React.useRef(null);
-            const readerId = "reader-container-" + Math.random().toString(36).substr(2, 9); // Unique ID
+            const readerId = "reader-container-" + Math.random().toString(36).substr(2, 9);
 
             const isSecure = window.isSecureContext; 
 
@@ -188,56 +243,83 @@
             );
         };
 
-        // --- AUDIT DETAIL MODAL ---
+        // --- AUDIT DETAIL MODAL (UPDATED TO SHOW ALL DATA) ---
         const AuditDetailModal = ({ data, onClose }) => {
             if (!data) return null;
+            
             const Row = ({ label, value, highlight, fullWidth }) => (
                 <div className={`flex ${fullWidth ? 'flex-col' : 'justify-between'} py-2 border-b border-slate-100 ${highlight ? 'bg-yellow-50 px-2 rounded -mx-2' : ''}`}>
                     <span className="text-slate-500 text-sm font-semibold">{label}</span>
-                    <span className={`text-sm text-right max-w-[70%] ${highlight ? 'text-red-600' : 'text-slate-800'} ${fullWidth ? 'font-normal text-left max-w-full mt-1 text-slate-700 bg-slate-50 p-1 rounded' : 'font-bold'}`}>{value || '-'}</span>
+                    <span className={`text-sm text-right ${fullWidth ? 'text-left mt-1' : ''} ${highlight ? 'text-red-600 font-bold' : 'text-slate-800'}`}>{value || '-'}</span>
                 </div>
             );
-            const handleExportPDF = () => {
-                const doc = new window.jspdf.jsPDF();
-                registerThaiFont(doc);
-                doc.setFont(THAI_FONT_NAME); 
-                const thaiAutoTableStyles = { font: THAI_FONT_NAME, fontStyle: 'normal' };
-                let y = 10;
-                doc.setFontSize(16); doc.text(`รายงาน Audit CNC-1: ${data.partNo}`, 10, y); y += 7;
-                doc.setFontSize(10); doc.text(`เลข Lot: ${data.lotNo}`, 10, y); doc.text(`ผู้ตรวจ: ${data.auditorId}`, 150, y); y += 5;
-                
-                doc.setFontSize(12); doc.text("1. ข้อมูลทั่วไป", 10, y + 5);
-                doc.autoTable({ startY: y + 8, head: [['รายการ', 'ข้อมูล']], body: [['Technician', data.technician], ['Date', data.date], ['Finish Time', data.finishTime], ['Audit Type', data.auditType]], theme: 'grid', styles: thaiAutoTableStyles });
-                y = doc.autoTable.previous.finalY;
-
-                doc.text("2. Checklist Result", 10, y + 10); y += 13;
-                // (Simplifying PDF logic for brevity in this full file view, keeps main logic)
-                const checklistBody = CHECKLIST_QUESTIONS_P2.map(q => [q.question.substring(0,30)+'...', data[q.id] || (data[`${q.id}-0`] ? 'Completed' : '-')]);
-                doc.autoTable({ startY: y, head: [['คำถาม', 'คำตอบ']], body: checklistBody, theme: 'grid', styles: thaiAutoTableStyles });
-                y = doc.autoTable.previous.finalY;
-
-                doc.text("3. Final Result", 10, y + 10); y += 13;
-                const resultBody = [['Total Count (A)', data.q10_5], ['Monitor Count (B)', data.q10_6], ['Result', data.q10_7], ['Discarded', data.discarded ? 'YES' : 'NO']];
-                doc.autoTable({ startY: y, head: [['รายการ', 'ค่า']], body: resultBody, theme: 'grid', styles: thaiAutoTableStyles });
-                doc.save(`Audit_${data.partNo}.pdf`);
-            };
 
             return (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 fade-in" onClick={onClose}>
                     <div className="bg-white w-full max-w-lg max-h-[90vh] rounded-2xl shadow-2xl flex flex-col modal-enter" onClick={e => e.stopPropagation()}>
-                        <div className="p-4 border-b flex justify-between items-center"><h2 className="text-lg font-bold">{data.partNo}</h2><button onClick={onClose}><i className="fas fa-times"></i></button></div>
-                        <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                            <Row label="Part No." value={data.partNo} />
-                            <Row label="Lot No." value={data.lotNo} />
-                            <Row label="Result" value={data.q10_7} highlight={data.q10_7!=='เท่ากัน'} />
+                        <div className="p-4 border-b flex justify-between items-center bg-slate-50 rounded-t-2xl">
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-800">{data.partNo}</h2>
+                                <div className="text-xs text-slate-500">Lot: {data.lotNo}</div>
+                            </div>
+                            <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-200 text-slate-500 hover:bg-red-500 hover:text-white transition"><i className="fas fa-times"></i></button>
                         </div>
-                        <div className="p-4 border-t"><button onClick={handleExportPDF} className="w-full bg-red-600 text-white py-3 rounded-xl font-bold">PDF</button></div>
+                        
+                        <div className="flex-1 overflow-y-auto p-5 space-y-6">
+                            {/* 1. General Info */}
+                            <div>
+                                <h3 className="text-sm font-bold text-sky-600 mb-2 uppercase border-b border-sky-100 pb-1">1. ข้อมูลทั่วไป</h3>
+                                <Row label="Audit Date" value={data.date} />
+                                <Row label="Finish Time" value={data.finishTime} />
+                                <Row label="Technician" value={data.technician} />
+                                <Row label="Auditor" value={data.auditorId} />
+                            </div>
+
+                            {/* 2. Checklist */}
+                            <div>
+                                <h3 className="text-sm font-bold text-sky-600 mb-2 uppercase border-b border-sky-100 pb-1">2. ตรวจสอบ (Checklist)</h3>
+                                {CHECKLIST_QUESTIONS_P2.map((q, i) => (
+                                    <div key={i} className="mb-2">
+                                        {q.isMatrix ? (
+                                            <div className="bg-slate-50 p-2 rounded">
+                                                <div className="text-xs font-bold text-slate-600 mb-1">{q.question}</div>
+                                                {q.subItems.map((sub, idx) => (
+                                                    <div key={idx} className="flex justify-between text-xs py-1 border-b border-slate-200 last:border-0 pl-2">
+                                                        <span className="text-slate-500">{sub}</span>
+                                                        <span className="font-bold">{data[`${q.id}-${idx}`] || '-'}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <Row label={q.question.substring(0, 30) + '...'} value={data[q.id] + (data[`${q.id}_input`] ? ` (${data[`${q.id}_input`]})` : '')} fullWidth />
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* 3. Final Result */}
+                            <div>
+                                <h3 className="text-sm font-bold text-sky-600 mb-2 uppercase border-b border-sky-100 pb-1">3. สรุปผล (Final Result)</h3>
+                                <Row label="10.5 Total Count (A)" value={data.q10_5} />
+                                <Row label="10.6 Monitor Count (B)" value={data.q10_6} />
+                                <Row label="10.7 Result (A vs B)" value={data.q10_7} highlight={data.q10_7 !== 'เท่ากัน'} />
+                                {data.reason_mismatch && <Row label="Mismatch Reason" value={data.reason_mismatch} fullWidth />}
+                                {data.reason_over10 && <Row label="Over 10 Reason" value={`${data.reason_over10} (Header: ${data.leader_id})`} fullWidth />}
+                                <Row label="Discarded Status" value={data.discarded ? 'Confirmed' : 'Pending'} />
+                            </div>
+                        </div>
+
+                        <div className="p-4 border-t bg-slate-50 rounded-b-2xl">
+                            <button onClick={() => exportToExcel(data)} className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold shadow-md transition transform active:scale-95">
+                                <i className="fas fa-file-excel mr-2"></i> Export This Log to Excel
+                            </button>
+                        </div>
                     </div>
                 </div>
             );
         };
 
-        // --- MAIN FORM COMPONENT (UPDATED FOR QR SCAN) ---
+        // --- MAIN FORM COMPONENT ---
         const CNCForm = ({ auditorId, onSave, onCancel }) => {
             const [step, setStep] = React.useState(1);
             const [errors, setErrors] = React.useState({});
@@ -245,15 +327,22 @@
 
             // Data States
             const [formData, setFormData] = React.useState({ auditType: 'Plan', technician: '', date: new Date().toISOString().split('T')[0], partNo: '', lotNo: '', finishTime: '' });
-            const [partRev, setPartRev] = React.useState('');
             
             // Scanner State
             const [isScanning, setIsScanning] = React.useState(false);
 
             const [checklist, setChecklist] = React.useState({});
             const [otherInputs, setOtherInputs] = React.useState({});
+            
+            // Step 3 Data
             const [step3Data, setStep3Data] = React.useState({ chk10_1: false, chk10_2: false, q10_3_split_qty: '0', q10_3_full_qty: '0', q10_4_split_qty: '0', q10_4_full_qty: '0', q10_5: '0', q10_6: '', q10_7: 'เท่ากัน', reason_over10: '', leader_id: '', leader_sign: '', reason_mismatch: '' });
             const [step4Data, setStep4Data] = React.useState({ discarded: false, auditLeaderId: auditorId });
+
+            const renderCountOptions = (max = 50) => {
+                const options = [];
+                for(let i=0; i<=max; i++) options.push(<option key={i} value={i}>{i}</option>);
+                return options;
+            };
 
             // Auto Calculate A
             React.useEffect(() => {
@@ -277,11 +366,9 @@
             // Handle QR Scan Logic
             const handleQrScan = (decodedText) => {
                 setIsScanning(false);
-                // Format: PartNo, LotNo, ...
                 const parts = decodedText.split(',');
                 if (parts.length >= 2) {
                     setFormData(prev => ({ ...prev, partNo: parts[0].trim(), lotNo: parts[1].trim() }));
-                    setPartRev('');
                     setErrors({});
                 } else {
                     alert(`Format Error: ${decodedText}\nNeed: PartNo,LotNo`);
@@ -322,7 +409,7 @@
                 if (!step4Data.discarded) { alert("ยืนยันการทิ้งงาน"); return; }
                 setSubmitting(true);
                 setTimeout(() => {
-                    saveLog({ ...formData, partNo: formData.partNo+(partRev?`#${partRev}`:''), ...checklist, ...otherInputs, ...step3Data, ...step4Data, auditorId, timestamp: new Date().toLocaleString('th-TH') });
+                    saveLog({ ...formData, ...checklist, ...otherInputs, ...step3Data, ...step4Data, auditorId, timestamp: new Date().toLocaleString('th-TH') });
                     onSave();
                 }, 500);
             };
@@ -356,7 +443,6 @@
                                     </select>
                                 </div>
                                 
-                                {/* NEW SCANNER UI */}
                                 <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
                                     <h3 className="text-sm font-bold mb-3 text-sky-600">Scan Part/Lot</h3>
                                     <button onClick={() => setIsScanning(true)} className="w-full bg-green-500 text-white font-bold py-3 rounded-xl shadow flex items-center justify-center gap-2 active:scale-95 transition">
@@ -364,11 +450,7 @@
                                     </button>
                                     <div className="mt-3 bg-slate-50 p-3 rounded border border-slate-200">
                                         <div className="flex justify-between py-1 border-b"><span className="text-xs text-slate-500">Part No.</span><span className="font-bold">{formData.partNo || '-'}</span></div>
-                                        <div className="flex justify-between py-1 border-b"><span className="text-xs text-slate-500">Lot No.</span><span className="font-bold">{formData.lotNo || '-'}</span></div>
-                                        <div className="flex justify-between items-center py-1 pt-2">
-                                            <span className="text-xs text-slate-500">Rev #</span>
-                                            <input type="number" className="w-16 text-center border rounded bg-white font-bold" value={partRev} onChange={e=>setPartRev(e.target.value)} placeholder="-" />
-                                        </div>
+                                        <div className="flex justify-between py-1 pt-2"><span className="text-xs text-slate-500">Lot No.</span><span className="font-bold">{formData.lotNo || '-'}</span></div>
                                     </div>
                                     {(errors.partNo || errors.lotNo) && <div className="text-red-500 text-xs mt-1 text-center">❌ กรุณาสแกนให้ครบถ้วน</div>}
                                 </div>
@@ -410,8 +492,29 @@
                                 <div className="bg-white p-4 rounded-lg shadow-sm">
                                     <h3 className="text-sm font-bold mb-3">10.3 - 10.4 Count Check</h3>
                                     <div className="grid grid-cols-2 gap-2 mb-2"><div className="text-xs text-center font-bold text-slate-400">Split (เศษ)</div><div className="text-xs text-center font-bold text-slate-400">Full (เต็ม)</div></div>
-                                    <div className="flex items-center gap-2 mb-2"><div className="w-8 text-xs font-bold">Basket</div><input type="number" className="flex-1 border p-2 rounded text-center" placeholder="0" value={step3Data.q10_3_split_qty} onChange={e=>setStep3Data({...step3Data, q10_3_split_qty:e.target.value})} /><input type="number" className="flex-1 border p-2 rounded text-center" placeholder="0" value={step3Data.q10_3_full_qty} onChange={e=>setStep3Data({...step3Data, q10_3_full_qty:e.target.value})} /></div>
-                                    <div className="flex items-center gap-2 mb-2"><div className="w-8 text-xs font-bold">Tech</div><input type="number" className="flex-1 border p-2 rounded text-center" placeholder="0" value={step3Data.q10_4_split_qty} onChange={e=>setStep3Data({...step3Data, q10_4_split_qty:e.target.value})} /><input type="number" className="flex-1 border p-2 rounded text-center" placeholder="0" value={step3Data.q10_4_full_qty} onChange={e=>setStep3Data({...step3Data, q10_4_full_qty:e.target.value})} /></div>
+                                    
+                                    {/* 10.3 Basket */}
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <div className="w-8 text-xs font-bold">Basket</div>
+                                        <select className="flex-1 border p-2 rounded text-center bg-white" value={step3Data.q10_3_split_qty} onChange={e=>setStep3Data({...step3Data, q10_3_split_qty:e.target.value})}>
+                                            {renderCountOptions(50)}
+                                        </select>
+                                        <select className="flex-1 border p-2 rounded text-center bg-white" value={step3Data.q10_3_full_qty} onChange={e=>setStep3Data({...step3Data, q10_3_full_qty:e.target.value})}>
+                                            {renderCountOptions(50)}
+                                        </select>
+                                    </div>
+
+                                    {/* 10.4 Tech */}
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <div className="w-8 text-xs font-bold">Tech</div>
+                                        <select className="flex-1 border p-2 rounded text-center bg-white" value={step3Data.q10_4_split_qty} onChange={e=>setStep3Data({...step3Data, q10_4_split_qty:e.target.value})}>
+                                            {renderCountOptions(50)}
+                                        </select>
+                                        <select className="flex-1 border p-2 rounded text-center bg-white" value={step3Data.q10_4_full_qty} onChange={e=>setStep3Data({...step3Data, q10_4_full_qty:e.target.value})}>
+                                            {renderCountOptions(50)}
+                                        </select>
+                                    </div>
+
                                     <div className="mt-3 pt-3 border-t flex justify-between items-center"><span className="text-sm font-bold">Total (A)</span><span className="text-xl font-bold text-sky-600">{step3Data.q10_5}</span></div>
                                 </div>
                                 <div className={`bg-white p-4 rounded-lg shadow-sm ${errors.q10_6?'border-red-300 border':''}`}>
@@ -419,7 +522,7 @@
                                     <input type="number" className="w-full p-2 border rounded text-lg font-bold text-center" placeholder="ระบุค่าที่หน้าจอ" value={step3Data.q10_6} onChange={e=>setStep3Data({...step3Data, q10_6:e.target.value})} />
                                 </div>
                                 <div className={`p-4 rounded-lg shadow-sm text-center border-2 ${step3Data.q10_7==='เท่ากัน'?'bg-green-50 border-green-200 text-green-700':'bg-red-50 border-red-200 text-red-700'}`}>
-                                    <div className="text-xs font-bold uppercase mb-1">Result (A vs B)</div>
+                                    <div className="text-xs font-bold uppercase mb-1">10.7 Result (A vs B)</div>
                                     <div className="text-2xl font-bold">{step3Data.q10_7}</div>
                                 </div>
                                 {step3Data.q10_7 === 'ไม่เท่ากัน' && <textarea className="w-full p-2 border rounded" placeholder="ระบุสาเหตุที่ไม่เท่ากัน..." value={step3Data.reason_mismatch} onChange={e=>setStep3Data({...step3Data, reason_mismatch:e.target.value})}></textarea>}
@@ -455,20 +558,39 @@
         const Dashboard = ({ onNew, onLogout }) => {
             const [logs, setLogs] = React.useState([]);
             const [viewLog, setViewLog] = React.useState(null);
+            
             React.useEffect(() => { setLogs(getLogs()); }, []);
+            
+            const handleExportMaster = () => {
+                exportToExcel(); // Export all
+            };
+
             return (
                 <div className="h-screen flex flex-col bg-slate-100">
-                    <div className="bg-white p-4 shadow-sm flex justify-between items-center z-10">
-                        <h1 className="text-xl font-bold text-slate-800">Audit History</h1>
-                        <button onClick={onLogout} className="text-red-500 text-sm font-bold">Logout</button>
+                    <div className="bg-white p-4 shadow-sm flex flex-col gap-2 z-10">
+                        <div className="flex justify-between items-center">
+                            <h1 className="text-xl font-bold text-slate-800">Audit History</h1>
+                            <button onClick={onLogout} className="text-red-500 text-sm font-bold">Logout</button>
+                        </div>
+                        <button onClick={handleExportMaster} className="w-full bg-green-100 text-green-800 py-2 rounded-lg font-bold text-sm border border-green-200 flex items-center justify-center gap-2">
+                            <i className="fas fa-file-excel"></i> Download Master Excel (All)
+                        </button>
                     </div>
+                    
                     <div className="flex-1 overflow-y-auto p-4 pb-24">
                         <div className="space-y-3">
                             {logs.length===0 && <div className="text-center text-slate-400 mt-10">ไม่พบประวัติการตรวจ</div>}
                             {logs.map((l, i) => (
-                                <div key={i} onClick={()=>setViewLog(l)} className="bg-white p-4 rounded-xl shadow-sm border-l-4 border-sky-500 active:scale-95 transition cursor-pointer">
-                                    <div className="flex justify-between mb-1"><span className="font-bold text-lg">{l.partNo}</span><span className="text-xs text-slate-400">{l.timestamp}</span></div>
-                                    <div className="text-sm text-slate-600">Lot: {l.lotNo} | Result: <span className={l.q10_7==='เท่ากัน'?'text-green-600 font-bold':'text-red-600 font-bold'}>{l.q10_7}</span></div>
+                                <div key={i} onClick={()=>setViewLog(l)} className="bg-white p-4 rounded-xl shadow-sm border-l-4 border-sky-500 active:scale-95 transition cursor-pointer flex justify-between items-center group">
+                                    <div>
+                                        <div className="font-bold text-lg text-slate-800">{l.partNo}</div>
+                                        <div className="text-xs text-slate-400"><i className="far fa-clock mr-1"></i>{l.timestamp}</div>
+                                        <div className="text-sm text-slate-600 mt-1">Lot: {l.lotNo}</div>
+                                    </div>
+                                    <div className="text-right">
+                                        <div className={`font-bold ${l.q10_7==='เท่ากัน'?'text-green-600':'text-red-600'}`}>{l.q10_7}</div>
+                                        <div className="text-xs text-slate-400 mt-1">By {l.auditorId}</div>
+                                    </div>
                                 </div>
                             ))}
                         </div>
